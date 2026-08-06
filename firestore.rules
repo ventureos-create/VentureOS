@@ -1,0 +1,136 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isSignedIn() &&
+        request.auth.token.email == "novixstudios6@gmail.com";
+    }
+
+    // ---------- users ----------
+    // One doc per authenticated user. Holds account + onboarding data.
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create: if isOwner(userId);
+      allow update: if isOwner(userId) || isAdmin();
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    // ---------- profiles ----------
+    // Public founder profiles used by co-founder matching. Readable by anyone signed in.
+    match /profiles/{userId} {
+      allow read: if isSignedIn();
+      allow create, update: if isOwner(userId) && isVerified();
+      allow delete: if isOwner(userId) || isAdmin();
+    }
+
+    // ---------- posts ----------
+    match /posts/{postId} {
+      allow read: if isSignedIn();
+      allow create: if isVerified() && request.resource.data.authorId == request.auth.uid;
+      allow update: if isVerified() &&
+        (resource.data.authorId == request.auth.uid || isAdmin());
+      allow delete: if isVerified() &&
+        (resource.data.authorId == request.auth.uid || isAdmin());
+
+      // ---------- comments (subcollection) ----------
+      match /comments/{commentId} {
+        allow read: if isSignedIn();
+        allow create: if isVerified() && request.resource.data.authorId == request.auth.uid;
+        allow update, delete: if isVerified() &&
+          (resource.data.authorId == request.auth.uid || isAdmin());
+      }
+
+      // ---------- likes (subcollection, doc id == uid) ----------
+      match /likes/{uid} {
+        allow read: if isSignedIn();
+        allow write: if isVerified() && uid == request.auth.uid;
+      }
+    }
+
+    // ---------- bookmarks ----------
+    // Doc id: `${uid}_${postId}` so a user can only bookmark a post once.
+    // Read/delete are checked against the stored userId field (not just the doc-id prefix)
+    // so that a `where("userId", "==", uid)` list query — used by the Bookmarks page —
+    // is provably safe under Firestore rules, not just single-doc lookups by ID.
+    match /bookmarks/{bookmarkId} {
+      // Firestore checks this per matched document for both single-doc "get" reads
+      // and "list"/query reads, so a `where("userId","==",uid)` query is safe: any
+      // document that didn't belong to the requester would fail this check and the
+      // whole query is rejected rather than silently filtered.
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isVerified() &&
+        request.resource.data.userId == request.auth.uid &&
+        bookmarkId.matches(request.auth.uid + '_.*');
+      allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+
+    // ---------- connections (co-founder matching) ----------
+    // Doc holds { fromId, toId, status }. Either party can read; only the sender creates.
+    match /connections/{connectionId} {
+      allow read: if isSignedIn() &&
+        (resource.data.fromId == request.auth.uid || resource.data.toId == request.auth.uid || isAdmin());
+      allow create: if isVerified() && request.resource.data.fromId == request.auth.uid;
+      allow update: if isVerified() &&
+        (resource.data.fromId == request.auth.uid || resource.data.toId == request.auth.uid);
+      allow delete: if isVerified() &&
+        (resource.data.fromId == request.auth.uid || resource.data.toId == request.auth.uid || isAdmin());
+    }
+
+    // ---------- chats ----------
+    // Doc holds { participants: [uid1, uid2], ... }. Only participants may access.
+    match /chats/{chatId} {
+      allow read, update: if isSignedIn() && request.auth.uid in resource.data.participants;
+      allow create: if isVerified() && request.auth.uid in request.resource.data.participants;
+
+      match /messages/{messageId} {
+        allow read: if isSignedIn() &&
+          request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants;
+        allow create: if isVerified() &&
+          request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants &&
+          request.resource.data.senderId == request.auth.uid;
+        allow update: if isSignedIn() &&
+          request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participants;
+      }
+    }
+
+    // ---------- businessPlans ----------
+    match /businessPlans/{planId} {
+      allow read, update, delete: if isSignedIn() &&
+        (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isVerified() && request.resource.data.userId == request.auth.uid;
+    }
+
+    // ---------- marketingPlans ----------
+    match /marketingPlans/{planId} {
+      allow read, update, delete: if isSignedIn() &&
+        (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isVerified() && request.resource.data.userId == request.auth.uid;
+    }
+
+    // ---------- notifications ----------
+    match /notifications/{notificationId} {
+      allow read, update, delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isVerified();
+    }
+
+    // ---------- admin analytics snapshot (written by Cloud Functions / admin only) ----------
+    match /adminStats/{docId} {
+      allow read: if isAdmin();
+      allow write: if isAdmin();
+    }
+  }
+}
